@@ -6,5 +6,6 @@ pub const RATE_SCALE: i128 = 10_000_000;
 pub struct SwiftRampSwap;
 #[contractimpl]
 impl SwiftRampSwap {
+    // Run 1783248410
     pub fn initialize(env: Env, admin: Address) -> Result<(), ()> { Ok(()) }
 }
