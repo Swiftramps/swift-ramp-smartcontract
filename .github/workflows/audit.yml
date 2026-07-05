@@ -1,0 +1,9 @@
+name: Weekly Audit (run 1783248410)
+on:
+  schedule: [{cron: '0 8 * * 1'}]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo audit
