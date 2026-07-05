@@ -1,0 +1,10 @@
+name: Deploy (run 1783248410)
+on:
+  push: {tags: ["v*"]}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - run: echo "Deploy 1783248410"
