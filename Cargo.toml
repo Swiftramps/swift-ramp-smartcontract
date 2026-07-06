@@ -1,0 +1,3 @@
+[workspace]
+members = ["contracts/swiftramp-swap"]
+resolver = "2"
