@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+    contract, contractimpl, contracttype, Address, Env, Symbol,
 };
 
 #[contracttype]
@@ -34,7 +34,7 @@ impl LineproofIdentity {
         env.storage().instance().set(&DataKey::IdentityRecord(admin.clone()), &IdentityRecord {
             status: IdentityStatus::Active,
             queue_id: None,
-            registered_at: env.ledger().sequence(),
+            registered_at: env.ledger().sequence() as u64,
         });
     }
 
@@ -48,7 +48,7 @@ impl LineproofIdentity {
         let identity_record = IdentityRecord {
             status: IdentityStatus::Active,
             queue_id: queue_id.clone(),
-            registered_at: env.ledger().sequence(),
+            registered_at: env.ledger().sequence() as u64,
         };
         env.storage().instance().set(&DataKey::IdentityRecord(user.clone()), &identity_record);
 
@@ -64,7 +64,7 @@ impl LineproofIdentity {
         }
         admin.require_auth();
 
-        let mut identity_record: IdentityRecord = env.storage().instance().get(&DataKey::IdentityRecord(user)).unwrap();
+        let mut identity_record: IdentityRecord = env.storage().instance().get(&DataKey::IdentityRecord(user.clone())).unwrap();
         identity_record.status = IdentityStatus::Revoked;
         env.storage().instance().set(&DataKey::IdentityRecord(user), &identity_record);
     }
