@@ -246,6 +246,10 @@ impl SwiftRampSwap {
             .checked_div(RATE_SCALE)
             .expect("overflow in (amount * rate) / RATE_SCALE");
 
+    pub fn swap(env: Env, sender: Address, from: Symbol, to: Symbol, amount: i128, min_out: i128) -> i128 {
+        sender.require_auth();
+        let rate: i128 = env.storage().instance().get(&DataKey::Rate((from.clone(), to.clone()))).unwrap();
+        let out = amount * rate / RATE_SCALE;
         if out < min_out {
             // Panic rolls back the lock automatically — no manual unlock needed.
             panic!("slippage exceeded");
