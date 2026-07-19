@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Symbol,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
 
 pub const RATE_SCALE: i128 = 10_000_000;
@@ -8,7 +8,7 @@ pub const RATE_SCALE: i128 = 10_000_000;
 #[contracttype]
 pub enum DataKey {
     Admin,
-    Rate(Symbol),
+    Rate((Symbol, Symbol)),
     LiquidityToken(Symbol),
     Commitment(BytesN<32>),
 }
@@ -39,9 +39,9 @@ impl SwiftRampSwap {
         amount * rate / RATE_SCALE
     }
 
-    pub fn swap(env: Env, from: Symbol, to: Symbol, amount: i128, min_out: i128) -> i128 {
-        let sender = env.invoker();
-        let rate: i128 = env.storage().instance().get(&DataKey::Rate((from, to))).unwrap();
+    pub fn swap(env: Env, sender: Address, from: Symbol, to: Symbol, amount: i128, min_out: i128) -> i128 {
+        sender.require_auth();
+        let rate: i128 = env.storage().instance().get(&DataKey::Rate((from.clone(), to.clone()))).unwrap();
         let out = amount * rate / RATE_SCALE;
         if out < min_out {
             panic!("slippage exceeded");
