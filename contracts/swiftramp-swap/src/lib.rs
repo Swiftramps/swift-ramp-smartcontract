@@ -17,6 +17,7 @@ pub enum DataKey {
     /// Unix timestamp (ledger time) when the rate for this pair was last set.
     RateTimestamp((Symbol, Symbol)),
     LiquidityToken(Symbol),
+    /// Commitment hash storage key for the audit-proof commit-reveal scheme.
     Commitment(BytesN<32>),
     /// Reentrancy guard: present while swap() is executing.
     ///
@@ -65,13 +66,6 @@ impl SwiftRampSwap {
         if rate <= 0 {
             panic!("rate must be positive");
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::Rate((from, to)), &rate);
-
-        if rate <= 0 {
-            panic!("rate must be positive");
-        }
         if rate > MAX_RATE {
             panic!("rate exceeds maximum safe value");
         }
@@ -95,20 +89,6 @@ impl SwiftRampSwap {
         env.storage()
             .instance()
             .set(&DataKey::LiquidityToken(currency), &token_addr);
-    }
-
-    pub fn quote(env: Env, from: Symbol, to: Symbol, amount: i128) -> i128 {
-        let rate: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Rate((from, to)))
-            .unwrap();
-        amount * rate / RATE_SCALE
-    }
-
-    pub fn swap(
-        env: Env,
-        sender: Address,
     }
 
     /// Transfer admin rights to `new_admin`.
@@ -248,18 +228,18 @@ impl SwiftRampSwap {
     /// - Token addresses are not configured.
     pub fn swap(
         env: Env,
+        sender: Address,
         from: Symbol,
         to: Symbol,
         amount: i128,
         min_out: i128,
-    ) -> i128 {
         max_age_secs: u64,
     ) -> i128 {
         // ── 1. Acquire reentrancy lock ────────────────────────────────────────
         Self::lock(&env);
 
         // ── 2. Validate inputs and compute output amount ──────────────────────
-        let sender = env.invoker();
+        sender.require_auth();
         let rate = Self::load_fresh_rate(&env, from.clone(), to.clone(), max_age_secs);
 
         let out = amount
@@ -268,14 +248,6 @@ impl SwiftRampSwap {
             .checked_div(RATE_SCALE)
             .expect("overflow in (amount * rate) / RATE_SCALE");
 
-    pub fn swap(env: Env, sender: Address, from: Symbol, to: Symbol, amount: i128, min_out: i128) -> i128 {
-        sender.require_auth();
-        let rate: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Rate((from.clone(), to.clone())))
-            .unwrap();
-        let out = amount * rate / RATE_SCALE;
         if out < min_out {
             // Panic rolls back the lock automatically — no manual unlock needed.
             panic!("slippage exceeded");
@@ -336,14 +308,10 @@ impl SwiftRampSwap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, token, Env};
-
-    fn setup() -> (Env, Address, Address) {
     use soroban_sdk::{
-        contract, contractimpl,
         symbol_short,
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Env, Symbol,
+        token, Address, Env,
     };
 
     // ── ledger / setup helpers ────────────────────────────────────────────────
@@ -361,21 +329,49 @@ mod tests {
         }
     }
 
-    fn setup_at(start_ts: u64) -> (Env, Address, SwiftRampSwapClient<'static>) {
+    fn setup_at(start_ts: u64) -> (Env, Address, Address, SwiftRampSwapClient<'static>) {
         let env = Env::default();
         env.ledger().set(ledger_at(start_ts));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
-        (env, admin, client)
+        (env, admin, contract_id, client)
+    }
+
+    fn setup_swap() -> (Env, Address, SwiftRampSwapClient<'static>, Address, Address, Address) {
+        let (env, _admin, contract_id, client) = setup_at(1_720_000_000);
+        env.mock_all_auths();
+        let sender = Address::generate(&env);
+        let from_asset = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let to_asset = env.register_stellar_asset_contract_v2(Address::generate(&env));
+        let from_token = from_asset.address();
+        let to_token = to_asset.address();
+        client.set_currency_token(&symbol_short!("USD"), &from_token);
+        client.set_currency_token(&symbol_short!("EUR"), &to_token);
+        client.set_rate(
+            &symbol_short!("USD"),
+            &symbol_short!("EUR"),
+            &(2 * RATE_SCALE),
+        );
+        token::StellarAssetClient::new(&env, &from_token).mint(&sender, &1_000);
+        token::StellarAssetClient::new(&env, &to_token).mint(&contract_id, &1_000);
+        (env, sender, client, contract_id, from_token, to_token)
     }
 
     // ── initialize ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_initialize() {
-        let (_env, _admin, _client) = setup_at(1_000_000);
+        let (_env, _admin, _contract_id, _client) = setup_at(1_000_000);
+    }
+
+    #[test]
+    fn test_initialize_cannot_be_called_twice() {
+        let (env, admin, contract_id, _client) = setup_at(1_000_000);
+        let client = SwiftRampSwapClient::new(&env, &contract_id);
+        // Contract was already initialized in setup_at; second call must fail.
+        assert!(client.try_initialize(&admin).is_err());
     }
 
     // ── set_rate bounds ───────────────────────────────────────────────────────
@@ -383,7 +379,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "rate must be positive")]
     fn test_set_rate_zero_panics() {
-        let (env, _admin, client) = setup_at(1_000_000);
+        let (env, _admin, _contract_id, client) = setup_at(1_000_000);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &0i128);
     }
@@ -391,7 +387,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "rate must be positive")]
     fn test_set_rate_negative_panics() {
-        let (env, _admin, client) = setup_at(1_000_000);
+        let (env, _admin, _contract_id, client) = setup_at(1_000_000);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &-1i128);
     }
@@ -399,7 +395,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "rate exceeds maximum safe value")]
     fn test_set_rate_above_max_panics() {
-        let (env, _admin, client) = setup_at(1_000_000);
+        let (env, _admin, _contract_id, client) = setup_at(1_000_000);
         env.mock_all_auths();
         client.set_rate(
             &symbol_short!("USD"),
@@ -410,9 +406,27 @@ mod tests {
 
     #[test]
     fn test_set_rate_at_max_succeeds() {
-        let (env, _admin, client) = setup_at(1_000_000);
+        let (env, _admin, _contract_id, client) = setup_at(1_000_000);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &MAX_RATE);
+    }
+
+    #[test]
+    fn test_set_rate_non_admin_reverts() {
+        let (_env, _admin, _contract_id, client) = setup_at(1_000_000);
+        // No auth mocked — must revert.
+        assert!(client
+            .try_set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &RATE_SCALE)
+            .is_err());
+    }
+
+    #[test]
+    fn test_set_currency_token_non_admin_reverts() {
+        let (env, _admin, _contract_id, client) = setup_at(1_000_000);
+        // No auth mocked — must revert.
+        assert!(client
+            .try_set_currency_token(&symbol_short!("USD"), &Address::generate(&env))
+            .is_err());
     }
 
     // ── timestamp storage ─────────────────────────────────────────────────────
@@ -420,7 +434,7 @@ mod tests {
     #[test]
     fn test_set_rate_stores_timestamp() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &RATE_SCALE);
         assert_eq!(
@@ -431,10 +445,31 @@ mod tests {
 
     #[test]
     fn test_rate_timestamp_returns_zero_when_unset() {
-        let (_env, _admin, client) = setup_at(1_000_000);
+        let (_env, _admin, _contract_id, client) = setup_at(1_000_000);
         assert_eq!(
             client.rate_timestamp(&symbol_short!("EUR"), &symbol_short!("GBP")),
             0
+        );
+    }
+
+    #[test]
+    fn test_set_rate_overwrites() {
+        let (env, _admin, _contract_id, client) = setup_at(1_720_000_000);
+        env.mock_all_auths();
+        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &RATE_SCALE);
+        client.set_rate(
+            &symbol_short!("USD"),
+            &symbol_short!("EUR"),
+            &(3 * RATE_SCALE),
+        );
+        assert_eq!(
+            client.quote(
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &10,
+                &DEFAULT_MAX_AGE_SECS
+            ),
+            30
         );
     }
 
@@ -443,7 +478,7 @@ mod tests {
     #[test]
     fn test_quote_fresh_rate_passes() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &15_000_000i128);
         env.ledger().set(ledger_at(start + 1_800));
@@ -462,7 +497,7 @@ mod tests {
     #[should_panic(expected = "rate expired")]
     fn test_quote_stale_rate_panics() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &15_000_000i128);
         env.ledger().set(ledger_at(start + DEFAULT_MAX_AGE_SECS + 1));
@@ -477,7 +512,7 @@ mod tests {
     #[test]
     fn test_quote_exactly_at_max_age_passes() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &RATE_SCALE);
         env.ledger().set(ledger_at(start + DEFAULT_MAX_AGE_SECS));
@@ -496,7 +531,7 @@ mod tests {
     #[should_panic(expected = "rate expired")]
     fn test_quote_tight_max_age_panics() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &RATE_SCALE);
         env.ledger().set(ledger_at(start + 700));
@@ -511,7 +546,7 @@ mod tests {
     #[test]
     fn test_admin_can_update_expired_rate() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &RATE_SCALE);
         let refresh_ts = start + DEFAULT_MAX_AGE_SECS + 100;
@@ -538,7 +573,7 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -556,17 +591,153 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_quote_zero_amount() {
+        let (env, _admin, _contract_id, client) = setup_at(1_720_000_000);
+        env.mock_all_auths();
+        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &12_345_678);
+        assert_eq!(
+            client.quote(
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &0,
+                &DEFAULT_MAX_AGE_SECS
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn test_quote_precision() {
+        let (env, _admin, _contract_id, client) = setup_at(1_720_000_000);
+        env.mock_all_auths();
+        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &12_345_678);
+        assert_eq!(
+            client.quote(
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &RATE_SCALE,
+                &DEFAULT_MAX_AGE_SECS
+            ),
+            12_345_678
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "no rate set for pair")]
+    fn test_quote_unknown_pair() {
+        let (_env, _admin, _contract_id, client) = setup_at(1_720_000_000);
+        client.quote(
+            &symbol_short!("USD"),
+            &symbol_short!("EUR"),
+            &100,
+            &DEFAULT_MAX_AGE_SECS,
+        );
+    }
+
+    // ── swap tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_swap_basic() {
+        let (env, sender, client, contract_id, from_token, to_token) = setup_swap();
+        assert_eq!(
+            client.swap(
+                &sender,
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &100,
+                &200,
+                &DEFAULT_MAX_AGE_SECS,
+            ),
+            200
+        );
+        assert_eq!(token::Client::new(&env, &from_token).balance(&sender), 900);
+        assert_eq!(
+            token::Client::new(&env, &from_token).balance(&contract_id),
+            100
+        );
+        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 200);
+        assert_eq!(
+            token::Client::new(&env, &to_token).balance(&contract_id),
+            800
+        );
+    }
+
+    #[test]
+    fn test_swap_slippage_protection() {
+        let (env, sender, client, _contract_id, from_token, to_token) = setup_swap();
+        assert!(client
+            .try_swap(
+                &sender,
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &100,
+                &201,
+                &DEFAULT_MAX_AGE_SECS,
+            )
+            .is_err());
+        assert_eq!(
+            token::Client::new(&env, &from_token).balance(&sender),
+            1_000
+        );
+        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 0);
+    }
+
+    #[test]
+    fn test_swap_insufficient_liquidity() {
+        let (env, sender, client, contract_id, _from_token, to_token) = setup_swap();
+        assert!(client
+            .try_swap(
+                &sender,
+                &symbol_short!("USD"),
+                &symbol_short!("EUR"),
+                &600,
+                &1_200,
+                &DEFAULT_MAX_AGE_SECS,
+            )
+            .is_err());
+        assert_eq!(
+            token::Client::new(&env, &to_token).balance(&contract_id),
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_swap_multiple_sequential() {
+        let (env, sender, client, _contract_id, from_token, to_token) = setup_swap();
+        client.swap(
+            &sender,
+            &symbol_short!("USD"),
+            &symbol_short!("EUR"),
+            &100,
+            &200,
+            &DEFAULT_MAX_AGE_SECS,
+        );
+        client.swap(
+            &sender,
+            &symbol_short!("USD"),
+            &symbol_short!("EUR"),
+            &100,
+            &200,
+            &DEFAULT_MAX_AGE_SECS,
+        );
+        assert_eq!(token::Client::new(&env, &from_token).balance(&sender), 800);
+        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 400);
+    }
+
     // ── swap freshness ────────────────────────────────────────────────────────
 
     #[test]
     #[should_panic(expected = "rate expired")]
     fn test_swap_stale_rate_panics() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
+        let sender = Address::generate(&env);
         client.set_rate(&symbol_short!("USD"), &symbol_short!("NGN"), &15_000_000i128);
         env.ledger().set(ledger_at(start + DEFAULT_MAX_AGE_SECS + 1));
         client.swap(
+            &sender,
             &symbol_short!("USD"),
             &symbol_short!("NGN"),
             &100i128,
@@ -580,7 +751,7 @@ mod tests {
     /// Verify the lock is NOT held outside of an active swap.
     #[test]
     fn test_lock_not_held_at_rest() {
-        let (_env, _admin, client) = setup_at(1_720_000_000);
+        let (_env, _admin, _contract_id, client) = setup_at(1_720_000_000);
         assert!(!client.is_locked());
     }
 
@@ -594,7 +765,7 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -610,7 +781,9 @@ mod tests {
         });
 
         // swap() must panic before performing any state changes or transfers.
+        let sender = Address::generate(&env);
         client.swap(
+            &sender,
             &symbol_short!("USD"),
             &symbol_short!("NGN"),
             &100i128,
@@ -626,7 +799,7 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -639,10 +812,6 @@ mod tests {
             env.storage().instance().set(&DataKey::Locked, &true);
         });
 
-        // The lock was "injected" directly into this test's storage context —
-        // the contract's lock() helper would have removed it on any abort.
-        // Manually verify the lock query reflects the injected state, then
-        // remove it to confirm the cleared state is readable.
         assert!(client.is_locked());
         env.as_contract(&contract_id, || {
             env.storage().instance().remove(&DataKey::Locked);
@@ -650,18 +819,13 @@ mod tests {
         assert!(!client.is_locked());
     }
 
-    /// A malicious token contract that attempts to re-enter swap().
-    ///
-    /// In Soroban's testutils environment, cross-contract re-entrancy is not
-    /// executable the same way as on-chain, so we validate the guard
-    /// mechanism directly: the lock key is present during the window when
-    /// transfers would be executing, and absent before/after.
+    /// Verify the lock mechanism: set, assert held, clear, assert cleared.
     #[test]
     fn test_lock_is_set_and_cleared_around_transfers() {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -669,14 +833,12 @@ mod tests {
         // Confirm lock is absent before any swap.
         assert!(!client.is_locked());
 
-        // Directly invoke lock/unlock via storage to verify the mechanism,
+        // Directly exercise lock/unlock via storage to verify the mechanism,
         // mirroring what swap() does internally.
         env.as_contract(&contract_id, || {
-            // lock()
             assert!(!env.storage().instance().has(&DataKey::Locked));
             env.storage().instance().set(&DataKey::Locked, &true);
             assert!(env.storage().instance().has(&DataKey::Locked));
-            // unlock()
             env.storage().instance().remove(&DataKey::Locked);
             assert!(!env.storage().instance().has(&DataKey::Locked));
         });
@@ -685,12 +847,12 @@ mod tests {
         assert!(!client.is_locked());
     }
 
-    // ── rotate_admin (#28) ────────────────────────────────────────────────────
+    // ── rotate_admin ──────────────────────────────────────────────────────────
 
     /// Normal rotation: old admin + new admin both authorize → succeeds.
     #[test]
     fn test_rotate_admin_succeeds() {
-        let (env, _old_admin, client) = setup_at(1_720_000_000);
+        let (env, _old_admin, _contract_id, client) = setup_at(1_720_000_000);
         let new_admin = Address::generate(&env);
         env.mock_all_auths();
         client.rotate_admin(&new_admin);
@@ -706,7 +868,7 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let old_admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
@@ -717,8 +879,6 @@ mod tests {
         client.rotate_admin(&new_admin);
 
         // Now try to call set_rate authorizing only the OLD admin — must fail.
-        // We stop mocking all auths and instead mock only the old admin.
-        // The contract will require new_admin's auth, which we don't provide.
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &old_admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -726,14 +886,8 @@ mod tests {
                 fn_name: "set_rate",
                 args: soroban_sdk::vec![
                     &env,
-                    soroban_sdk::IntoVal::into_val(
-                        &symbol_short!("USD"),
-                        &env,
-                    ),
-                    soroban_sdk::IntoVal::into_val(
-                        &symbol_short!("NGN"),
-                        &env,
-                    ),
+                    soroban_sdk::IntoVal::into_val(&symbol_short!("USD"), &env),
+                    soroban_sdk::IntoVal::into_val(&symbol_short!("NGN"), &env),
                     soroban_sdk::IntoVal::into_val(&RATE_SCALE, &env),
                 ],
                 sub_invokes: &[],
@@ -746,7 +900,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_rotate_admin_requires_new_admin_auth() {
-        let (env, _admin, client) = setup_at(1_720_000_000);
+        let (env, _admin, _contract_id, client) = setup_at(1_720_000_000);
         let new_admin = Address::generate(&env);
 
         // Only mock the current admin's auth, not the new admin's.
@@ -754,7 +908,7 @@ mod tests {
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &_admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &env.register(SwiftRampSwap, ()), // wrong id intentionally
+                contract: &env.register_contract(None::<&Address>, SwiftRampSwap),
                 fn_name: "rotate_admin",
                 args: soroban_sdk::vec![&env],
                 sub_invokes: &[],
@@ -763,12 +917,12 @@ mod tests {
         client.rotate_admin(&new_admin);
     }
 
-    // ── oracle_heartbeat (#28) ─────────────────────────────────────────────────
+    // ── oracle_heartbeat ──────────────────────────────────────────────────────
 
     #[test]
     fn test_oracle_heartbeat_stores_timestamp() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
 
         assert_eq!(client.last_heartbeat(), 0u64);
@@ -779,7 +933,7 @@ mod tests {
     #[test]
     fn test_oracle_heartbeat_updates_on_second_call() {
         let start = 1_720_000_000u64;
-        let (env, _admin, client) = setup_at(start);
+        let (env, _admin, _contract_id, client) = setup_at(start);
         env.mock_all_auths();
 
         client.oracle_heartbeat();
@@ -793,12 +947,12 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_oracle_heartbeat_requires_admin_auth() {
-        let (_env, _admin, client) = setup_at(1_720_000_000);
+        let (_env, _admin, _contract_id, client) = setup_at(1_720_000_000);
         // No auth mocked — must panic.
         client.oracle_heartbeat();
     }
 
-    // ── arithmetic overflow regressions (#16) ─────────────────────────────────
+    // ── arithmetic overflow regressions ───────────────────────────────────────
 
     #[test]
     #[should_panic]
@@ -806,7 +960,7 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         let client = SwiftRampSwapClient::new(&env, &contract_id);
         client.initialize(&admin);
@@ -834,232 +988,37 @@ mod tests {
         let start = 1_720_000_000u64;
         let env = Env::default();
         env.ledger().set(ledger_at(start));
-        let contract_id = env.register(SwiftRampSwap, ());
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let admin = Address::generate(&env);
         SwiftRampSwapClient::new(&env, &contract_id).initialize(&admin);
-        (env, contract_id, admin)
-    }
-
-    fn setup_swap() -> (Env, Address, Address, Address, Address) {
-        let (env, contract_id, _admin) = setup();
         env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(
+                &DataKey::Rate((symbol_short!("USD"), symbol_short!("NGN"))),
+                &i128::MAX,
+            );
+            env.storage().instance().set(
+                &DataKey::RateTimestamp((symbol_short!("USD"), symbol_short!("NGN"))),
+                &start,
+            );
+        });
         let sender = Address::generate(&env);
-        let from_asset = env.register_stellar_asset_contract_v2(Address::generate(&env));
-        let to_asset = env.register_stellar_asset_contract_v2(Address::generate(&env));
-        let from_token = from_asset.address();
-        let to_token = to_asset.address();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.set_currency_token(&symbol_short!("USD"), &from_token);
-        client.set_currency_token(&symbol_short!("EUR"), &to_token);
-        client.set_rate(
-            &symbol_short!("USD"),
-            &symbol_short!("EUR"),
-            &(2 * RATE_SCALE),
-        );
-        token::StellarAssetClient::new(&env, &from_token).mint(&sender, &1_000);
-        token::StellarAssetClient::new(&env, &to_token).mint(&contract_id, &1_000);
-        (env, contract_id, sender, from_token, to_token)
-    }
-
-    #[test]
-    fn test_initialize() {
-        setup();
-    }
-
-    #[test]
-    fn test_initialize_cannot_be_called_twice() {
-        let (env, contract_id, admin) = setup();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client.try_initialize(&admin).is_err());
-    }
-
-    #[test]
-    fn test_set_rate_non_admin_reverts() {
-        let (env, contract_id, _admin) = setup();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &RATE_SCALE)
-            .is_err());
-    }
-
-    #[test]
-    fn test_set_currency_token_non_admin_reverts() {
-        let (env, contract_id, _admin) = setup();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_set_currency_token(&symbol_short!("USD"), &Address::generate(&env))
-            .is_err());
-    }
-
-    #[test]
-    fn test_set_rate_and_quote() {
-        let (env, contract_id, _admin) = setup();
-        env.mock_all_auths();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.set_rate(
-            &symbol_short!("USD"),
-            &symbol_short!("EUR"),
-            &(2 * RATE_SCALE),
-        );
-        assert_eq!(
-            client.quote(&symbol_short!("USD"), &symbol_short!("EUR"), &125),
-            250
-        );
-    }
-
-    #[test]
-    fn test_set_rate_overwrites() {
-        let (env, contract_id, _admin) = setup();
-        env.mock_all_auths();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &RATE_SCALE);
-        client.set_rate(
-            &symbol_short!("USD"),
-            &symbol_short!("EUR"),
-            &(3 * RATE_SCALE),
-        );
-        assert_eq!(
-            client.quote(&symbol_short!("USD"), &symbol_short!("EUR"), &10),
-            30
-        );
-    }
-
-    #[test]
-    fn test_set_rate_zero_or_negative() {
-        let (env, contract_id, _admin) = setup();
-        env.mock_all_auths();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &0)
-            .is_err());
-        assert!(client
-            .try_set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &-1)
-            .is_err());
-    }
-
-    #[test]
-    fn test_quote_unknown_pair() {
-        let (env, contract_id, _admin) = setup();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_quote(&symbol_short!("USD"), &symbol_short!("EUR"), &100)
-            .is_err());
-    }
-
-    #[test]
-    fn test_quote_zero_amount() {
-        let (env, contract_id, _admin) = setup();
-        env.mock_all_auths();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &12_345_678);
-        assert_eq!(
-            client.quote(&symbol_short!("USD"), &symbol_short!("EUR"), &0),
-            0
-        );
-    }
-
-    #[test]
-    fn test_quote_precision() {
-        let (env, contract_id, _admin) = setup();
-        env.mock_all_auths();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.set_rate(&symbol_short!("USD"), &symbol_short!("EUR"), &12_345_678);
-        assert_eq!(
-            client.quote(&symbol_short!("USD"), &symbol_short!("EUR"), &RATE_SCALE),
-            12_345_678
-        );
-    }
-
-    #[test]
-    fn test_swap_basic() {
-        let (env, contract_id, sender, from_token, to_token) = setup_swap();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert_eq!(
-            client.swap(
-                &sender,
-                &symbol_short!("USD"),
-                &symbol_short!("EUR"),
-                &100,
-                &200
-            ),
-            200
-        );
-        assert_eq!(token::Client::new(&env, &from_token).balance(&sender), 900);
-        assert_eq!(
-            token::Client::new(&env, &from_token).balance(&contract_id),
-            100
-        );
-        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 200);
-        assert_eq!(
-            token::Client::new(&env, &to_token).balance(&contract_id),
-            800
-        );
-    }
-
-    #[test]
-    fn test_swap_slippage_protection() {
-        let (env, contract_id, sender, from_token, to_token) = setup_swap();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_swap(
-                &sender,
-                &symbol_short!("USD"),
-                &symbol_short!("EUR"),
-                &100,
-                &201
-            )
-            .is_err());
-        assert_eq!(
-            token::Client::new(&env, &from_token).balance(&sender),
-            1_000
-        );
-        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 0);
-    }
-
-    #[test]
-    fn test_swap_insufficient_liquidity() {
-        let (env, contract_id, sender, _from_token, to_token) = setup_swap();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        assert!(client
-            .try_swap(
-                &sender,
-                &symbol_short!("USD"),
-                &symbol_short!("EUR"),
-                &600,
-                &1_200
-            )
-            .is_err());
-        assert_eq!(
-            token::Client::new(&env, &to_token).balance(&contract_id),
-            1_000
-        );
-    }
-
-    #[test]
-    fn test_swap_multiple_sequential() {
-        let (env, contract_id, sender, from_token, to_token) = setup_swap();
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.swap(
+        SwiftRampSwapClient::new(&env, &contract_id).swap(
             &sender,
             &symbol_short!("USD"),
-            &symbol_short!("EUR"),
-            &100,
-            &200,
+            &symbol_short!("NGN"),
+            &2i128,
+            &0i128,
+            &DEFAULT_MAX_AGE_SECS,
         );
-        client.swap(
-            &sender,
-            &symbol_short!("USD"),
-            &symbol_short!("EUR"),
-            &100,
-            &200,
-        );
-        assert_eq!(token::Client::new(&env, &from_token).balance(&sender), 800);
-        assert_eq!(token::Client::new(&env, &to_token).balance(&sender), 400);
     }
+
+    // ── commitment key ────────────────────────────────────────────────────────
 
     #[test]
     fn test_commitment_key_remains_available() {
-        let (env, contract_id, _admin) = setup();
+        let (env, _admin, _contract_id, _client) = setup_at(1_720_000_000);
+        let contract_id = env.register_contract(None::<&Address>, SwiftRampSwap);
         let commitment = BytesN::from_array(&env, &[7; 32]);
         env.as_contract(&contract_id, || {
             env.storage()
@@ -1072,24 +1031,5 @@ mod tests {
                 Some(true)
             );
         });
-        let client = SwiftRampSwapClient::new(&env, &contract_id);
-        client.initialize(&admin);
-        env.as_contract(&contract_id, || {
-            env.storage().instance().set(
-                &DataKey::Rate((symbol_short!("USD"), symbol_short!("NGN"))),
-                &i128::MAX,
-            );
-            env.storage().instance().set(
-                &DataKey::RateTimestamp((symbol_short!("USD"), symbol_short!("NGN"))),
-                &start,
-            );
-        });
-        client.swap(
-            &symbol_short!("USD"),
-            &symbol_short!("NGN"),
-            &2i128,
-            &0i128,
-            &DEFAULT_MAX_AGE_SECS,
-        );
     }
 }
