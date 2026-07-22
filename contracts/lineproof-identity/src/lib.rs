@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    Symbol,
 };
 
 #[contracterror]
@@ -43,18 +44,30 @@ pub struct LineproofIdentity;
 #[contractimpl]
 impl LineproofIdentity {
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::IdentityRecord(admin.clone())) {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::IdentityRecord(admin.clone()))
+        {
             return Err(Error::AlreadyRegistered);
         }
-        env.storage().instance().set(&DataKey::IdentityRecord(admin.clone()), &IdentityRecord {
-            status: IdentityStatus::Active,
-            queue_id: None,
-            registered_at: env.ledger().sequence() as u64,
-        });
+        env.storage().instance().set(
+            &DataKey::IdentityRecord(admin.clone()),
+            &IdentityRecord {
+                status: IdentityStatus::Active,
+                queue_id: None,
+                registered_at: env.ledger().sequence() as u64,
+            },
+        );
         Ok(())
     }
 
-    pub fn register_identity(env: Env, admin: Address, user: Address, queue_id: Option<Symbol>) -> Result<(), Error> {
+    pub fn register_identity(
+        env: Env,
+        admin: Address,
+        user: Address,
+        queue_id: Option<Symbol>,
+    ) -> Result<(), Error> {
         let admin_record: IdentityRecord = env
             .storage()
             .instance()
@@ -66,7 +79,11 @@ impl LineproofIdentity {
         }
         admin.require_auth();
 
-        if env.storage().instance().has(&DataKey::IdentityRecord(user.clone())) {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::IdentityRecord(user.clone()))
+        {
             return Err(Error::AlreadyRegistered);
         }
 
@@ -75,10 +92,14 @@ impl LineproofIdentity {
             queue_id: queue_id.clone(),
             registered_at: env.ledger().sequence() as u64,
         };
-        env.storage().instance().set(&DataKey::IdentityRecord(user.clone()), &identity_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityRecord(user.clone()), &identity_record);
 
         if let Some(qid) = queue_id {
-            env.storage().instance().set(&DataKey::QueueMembership(qid, user), &true);
+            env.storage()
+                .instance()
+                .set(&DataKey::QueueMembership(qid, user), &true);
         }
         Ok(())
     }
@@ -106,7 +127,9 @@ impl LineproofIdentity {
         }
 
         identity_record.status = IdentityStatus::Revoked;
-        env.storage().instance().set(&DataKey::IdentityRecord(user), &identity_record);
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityRecord(user), &identity_record);
         Ok(())
     }
 
@@ -116,8 +139,14 @@ impl LineproofIdentity {
             return true;
         }
 
-        let from_record: Option<IdentityRecord> = env.storage().instance().get(&DataKey::IdentityRecord(from.clone()));
-        let to_record: Option<IdentityRecord> = env.storage().instance().get(&DataKey::IdentityRecord(to.clone()));
+        let from_record: Option<IdentityRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityRecord(from.clone()));
+        let to_record: Option<IdentityRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityRecord(to.clone()));
 
         // Unregistered identities cannot transfer
         let from_identity = match from_record {
@@ -131,27 +160,41 @@ impl LineproofIdentity {
         };
 
         // Return false for revoked identity regardless of queue membership
-        if from_identity.status == IdentityStatus::Revoked || to_identity.status == IdentityStatus::Revoked {
+        if from_identity.status == IdentityStatus::Revoked
+            || to_identity.status == IdentityStatus::Revoked
+        {
             return false;
         }
 
         // Verify queue membership for both parties
-        let from_in_queue: Option<bool> = env.storage().instance().get(&DataKey::QueueMembership(queue_id.clone(), from.clone()));
-        let to_in_queue: Option<bool> = env.storage().instance().get(&DataKey::QueueMembership(queue_id, to.clone()));
+        let from_in_queue: Option<bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey::QueueMembership(queue_id.clone(), from.clone()));
+        let to_in_queue: Option<bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey::QueueMembership(queue_id, to.clone()));
 
         // Both parties must be in the queue
         from_in_queue.unwrap_or(false) && to_in_queue.unwrap_or(false)
     }
 
     pub fn get_identity_status(env: Env, user: Address) -> Result<IdentityStatus, Error> {
-        let record: Option<IdentityRecord> = env.storage().instance().get(&DataKey::IdentityRecord(user));
+        let record: Option<IdentityRecord> =
+            env.storage().instance().get(&DataKey::IdentityRecord(user));
         match record {
             Some(identity) => Ok(identity.status),
             None => Err(Error::IdentityNotFound),
         }
     }
 
-    pub fn compute_proof_hash(env: Env, identity: Address, queue_id: Symbol, timestamp: u64) -> BytesN<32> {
+    pub fn compute_proof_hash(
+        env: Env,
+        identity: Address,
+        queue_id: Symbol,
+        timestamp: u64,
+    ) -> BytesN<32> {
         let mut bytes = Bytes::new(&env);
         bytes.append(&identity.to_xdr(&env));
         bytes.append(&queue_id.to_xdr(&env));
