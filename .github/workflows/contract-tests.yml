@@ -9,11 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.81.0
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
-        run: cargo fmt --package swiftramp-swap -- --check
+        run: |
+          cargo fmt --package swiftramp-swap -- --check
+          cargo fmt --package lineproof-identity -- --check
       - name: Run contract tests
         run: cargo test --workspace

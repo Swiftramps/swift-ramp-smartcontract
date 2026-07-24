@@ -3,40 +3,13 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, 
 
 pub const RATE_SCALE: i128 = 10_000_000;
 
-/// Maximum allowed rate: i128::MAX / RATE_SCALE, preventing overflow in
-/// checked_mul(rate) before the subsequent checked_div(RATE_SCALE).
-pub const MAX_RATE: i128 = i128::MAX / RATE_SCALE;
-
-/// Default maximum age (in seconds) a rate is considered fresh.
-pub const DEFAULT_MAX_AGE_SECS: u64 = 3_600; // 1 hour
-
 #[contracttype]
 pub enum DataKey {
     Admin,
     Rate((Symbol, Symbol)),
-    /// Unix timestamp (ledger time) when the rate for this pair was last set.
-    RateTimestamp((Symbol, Symbol)),
     LiquidityToken(Symbol),
     /// Commitment hash storage key for the audit-proof commit-reveal scheme.
     Commitment(BytesN<32>),
-    /// Reentrancy guard: present while swap() is executing.
-    ///
-    /// Soroban's host already traps direct re-entrant calls at the VM boundary,
-    /// but this explicit storage lock provides defense-in-depth against:
-    ///   - Future SDK changes that relax the re-entrancy restriction.
-    ///   - Indirect re-entrancy via proxy / wrapper contracts that call swap()
-    ///     from within a malicious token's transfer() hook.
-    ///
-    /// Implementation note: Soroban panics roll back the entire transaction
-    /// atomically, so we do NOT need to remove the lock on the panic/error
-    /// path — storage reversion is guaranteed by the host.  The lock is only
-    /// explicitly removed on the *success* path so that subsequent swap()
-    /// calls in the same transaction (if the SDK ever permits them) work
-    /// correctly.
-    Locked,
-    /// Ledger timestamp of the most recent successful oracle heartbeat.
-    /// Written by `oracle_heartbeat()`, readable via `last_heartbeat()`.
-    OracleHeartbeat,
 }
 
 #[contract]
@@ -45,21 +18,9 @@ pub struct SwiftRampSwap;
 #[contractimpl]
 impl SwiftRampSwap {
     pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialized");
-        }
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
-    // ── admin functions ───────────────────────────────────────────────────────
-
-    /// Set the exchange rate for a currency pair and stamp the current ledger
-    /// timestamp so callers can verify freshness.
-    ///
-    /// # Panics
-    /// - Caller is not the admin.
-    /// - `rate` ≤ 0.
-    /// - `rate` > `MAX_RATE` (would overflow `checked_mul` in `quote`/`swap`).
     pub fn set_rate(env: Env, from: Symbol, to: Symbol, rate: i128) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -79,10 +40,6 @@ impl SwiftRampSwap {
             .set(&DataKey::RateTimestamp((from, to)), &now);
     }
 
-    /// Associate a Soroban token address with a currency symbol.
-    ///
-    /// # Panics
-    /// Caller is not the admin.
     pub fn set_currency_token(env: Env, currency: Symbol, token_addr: Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -226,6 +183,7 @@ impl SwiftRampSwap {
     /// - Computed output < `min_out` (slippage guard).
     /// - Arithmetic overflow.
     /// - Token addresses are not configured.
+>>>>>>> origin/main
     pub fn swap(
         env: Env,
         sender: Address,
@@ -249,11 +207,8 @@ impl SwiftRampSwap {
             .expect("overflow in (amount * rate) / RATE_SCALE");
 
         if out < min_out {
-            // Panic rolls back the lock automatically — no manual unlock needed.
             panic!("slippage exceeded");
         }
-
-        // ── 3. Resolve token addresses ────────────────────────────────────────
         let from_token: Address = env
             .storage()
             .instance()
@@ -264,46 +219,19 @@ impl SwiftRampSwap {
             .instance()
             .get(&DataKey::LiquidityToken(to))
             .unwrap();
-
-        // ── 4. Cross-contract transfers (lock is held throughout) ─────────────
-        //
-        // Pull `amount` of `from_token` from the sender into this contract.
         token::Client::new(&env, &from_token).transfer(
             &sender,
             &env.current_contract_address(),
             &amount,
         );
-        // Push `out` of `to_token` from this contract to the sender.
         token::Client::new(&env, &to_token).transfer(
             &env.current_contract_address(),
             &sender,
             &out,
         );
-
-        // ── 5. Release lock on success ────────────────────────────────────────
-        Self::unlock(&env);
-
         out
     }
-
-    /// Return the Unix timestamp (seconds) when the rate for `(from, to)` was
-    /// last updated, or 0 if no timestamp has been stored yet.
-    pub fn rate_timestamp(env: Env, from: Symbol, to: Symbol) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::RateTimestamp((from, to)))
-            .unwrap_or(0)
-    }
-
-    /// Return whether the reentrancy lock is currently held.
-    ///
-    /// Exposed for off-chain monitoring and test assertions.
-    pub fn is_locked(env: Env) -> bool {
-        env.storage().instance().has(&DataKey::Locked)
-    }
 }
-
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1031,5 +959,6 @@ mod tests {
                 Some(true)
             );
         });
+>>>>>>> origin/main
     }
 }
