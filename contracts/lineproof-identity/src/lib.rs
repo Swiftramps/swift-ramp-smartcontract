@@ -258,14 +258,19 @@ mod tests {
     use super::*;
     use soroban_sdk::{symbol_short, testutils::Address as _, Env};
 
-    #[test]
-    fn test_initialize() {
+    fn setup() -> (Env, Address, LineproofIdentityClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
+        let contract_id = env.register_contract(None::<&Address>, LineproofIdentity);
         let admin = Address::generate(&env);
         let client = LineproofIdentityClient::new(&env, &contract_id);
-        assert_eq!(client.initialize(&admin), ());
+        client.initialize(&admin);
+        (env, admin, client)
+    }
+
+    #[test]
+    fn test_initialize() {
+        let (_env, _admin, _client) = setup();
     }
 
     #[test]
@@ -282,16 +287,10 @@ mod tests {
 
     #[test]
     fn test_can_transfer_reads_identity_record() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         // Register both users in the queue
         client.register_identity(&admin, &user1, &Some(queue_id.clone()));
@@ -304,16 +303,10 @@ mod tests {
 
     #[test]
     fn test_can_transfer_revoked_identity() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         // Register both users in the queue
         client.register_identity(&admin, &user1, &Some(queue_id.clone()));
@@ -328,16 +321,10 @@ mod tests {
 
     #[test]
     fn test_can_transfer_unregistered_identity() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         // Register only user1
         client.register_identity(&admin, &user1, &Some(queue_id.clone()));
@@ -349,16 +336,10 @@ mod tests {
 
     #[test]
     fn test_can_transfer_not_in_queue() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
         let user2 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         // Register both users without queue
         client.register_identity(&admin, &user1, &None);
@@ -370,15 +351,9 @@ mod tests {
 
     #[test]
     fn test_can_transfer_self_transfer() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, _admin, client) = setup();
         let user1 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         // Self-transfer should always be allowed
         assert!(client.can_transfer(&user1, &user1, &queue_id));
@@ -386,15 +361,9 @@ mod tests {
 
     #[test]
     fn test_get_identity_status() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(LineproofIdentity, ());
-        let admin = Address::generate(&env);
+        let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
         let queue_id = symbol_short!("queue1");
-
-        let client = LineproofIdentityClient::new(&env, &contract_id);
-        client.initialize(&admin);
 
         client.register_identity(&admin, &user1, &Some(queue_id.clone()));
         assert_eq!(client.get_identity_status(&user1), IdentityStatus::Active);

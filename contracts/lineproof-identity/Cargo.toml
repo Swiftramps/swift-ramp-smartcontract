@@ -16,9 +16,3 @@ soroban-sdk = "22"
 [dev-dependencies]
 soroban-sdk = { version = "22", features = ["testutils"] }
 
-[profile.release]
-opt-level = "z"
-overflow-checks = true
-lto = true
-debug = false
-codegen-units = 1
