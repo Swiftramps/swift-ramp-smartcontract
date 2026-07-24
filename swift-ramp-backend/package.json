@@ -2,9 +2,9 @@
   "name": "swift-ramp-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "SwiftRamp oracle backend — multi-provider FX rate pusher",
+  "description": "SwiftRamp oracle backend \u2014 multi-provider FX rate pusher",
   "scripts": {
-    "build": "tsc",
+    "build": "node init && tsc",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts"
@@ -25,6 +25,8 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "testMatch": ["**/__tests__/**/*.test.ts"]
+    "testMatch": [
+      "**/__tests__/**/*.test.ts"
+    ]
   }
 }
