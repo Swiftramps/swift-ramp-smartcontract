@@ -456,6 +456,12 @@ mod tests {
         assert_ne!(hash1_a, hash2);
         assert_ne!(hash1_a, hash3);
         assert_ne!(hash2, hash3);
+
+        // 3. Same identity + queue, different timestamp -> different hash. The
+        //    old XOR-fold collapsed same-ledger-second enrollments onto one
+        //    value; SHA-256 must not.
+        let hash_same_ts = client.compute_proof_hash(&user1, &queue_id, &(timestamp + 1));
+        assert_ne!(hash1_a, hash_same_ts);
     }
 
     // ---- cancel(): storage cleanup (issue #13) ----------------------------
