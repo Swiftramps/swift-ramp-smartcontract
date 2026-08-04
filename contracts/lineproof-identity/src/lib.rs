@@ -375,6 +375,7 @@ mod tests {
     #[test]
     fn test_typed_errors() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register(LineproofIdentity, ());
         let admin = Address::generate(&env);
         let user1 = Address::generate(&env);
