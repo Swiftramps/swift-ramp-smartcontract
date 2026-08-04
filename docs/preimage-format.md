@@ -110,3 +110,29 @@ export function computeProofHash(
 
 1. **SHA-256 Usage**: SHA-256 guarantees second-preimage resistance and collision resistance for on-chain identity compliance.
 2. **Determinism**: Given the identical inputs `(identity, queue_id, timestamp)`, the off-chain calculation produces the exact 32-byte digest emitted by the `LineproofIdentity` contract's `compute_proof_hash()` method.
+
+---
+
+## Why SHA-256 instead of an XOR-fold
+
+Earlier revisions folded the preimage into 32 bytes with a bitwise XOR
+(`timestamp ^ sequence`) rather than hashing it. XOR-fold is **not** a
+cryptographic hash and is unsuitable as an audit anchor:
+
+1. **No collision resistance.** XOR is a lossy, linear fold: two enrollments
+   that share the same ledger second produce the *same* folded value because the
+   only distinguishing inputs are the timestamp and sequence number, and a
+   second's resolution collapses them. The folded output is far smaller than its
+   inputs' entropy.
+2. **Trivial preimage construction.** Given a target folded value, an attacker
+   can choose inputs that XOR to it; there is no one-wayness, so a recorded hash
+   can be "matched" to fabricated enrollment details.
+3. **No avalanche effect.** Flipping one preimage bit flips only the 
+   corresponding bit of the output, so nearby identities/timestamps produce
+   highly correlated hashes.
+
+SHA-256 over the deterministic preimage
+`XDR(identity) ∥ XDR(queue_id) ∥ BigEndianU64(timestamp)` avoids all three:
+the digest is a one-way, collision-resistant function of the full preimage, and
+two enrollments are distinguished by their full 36-byte identity XDR even when
+they share a ledger second.
