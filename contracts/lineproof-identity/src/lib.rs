@@ -360,6 +360,22 @@ mod tests {
     }
 
     #[test]
+    fn test_can_transfer_mixed_membership() {
+        let (env, admin, client) = setup();
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        let queue_id = symbol_short!("queue1");
+
+        // Only user1 is in the queue; user2 is registered without one.
+        client.register_identity(&admin, &user1, &Some(queue_id.clone()));
+        client.register_identity(&admin, &user2, &None);
+
+        // A transfer needs both parties in the queue.
+        assert!(!client.can_transfer(&user1, &user2, &queue_id));
+        assert!(!client.can_transfer(&user2, &user1, &queue_id));
+    }
+
+    #[test]
     fn test_get_identity_status() {
         let (env, admin, client) = setup();
         let user1 = Address::generate(&env);
